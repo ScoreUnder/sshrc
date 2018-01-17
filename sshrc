@@ -30,7 +30,6 @@ EOF
 
         sed 's/^\s*//g' > "$SSHTARHOME/bashsshrc" << 'EOF'
             #!/bin/sh
-            "$SSHHOME/sshrc.welcome"
             exec bash --rcfile "$SSHHOME/sshrc.bashrc" "$@"
 EOF
         chmod -- +x "$SSHTARHOME/bashsshrc"
@@ -54,7 +53,7 @@ EOF
         FINAL_SCRIPT=$FINAL_SCRIPT';SSHHOME=;trap '\''rm -rf -- "$SSHHOME"'\'' 0'
         FINAL_SCRIPT=$FINAL_SCRIPT'&&export SSHHOME=$(mktemp -d -t sshrc.XXXXXXXX)'
         FINAL_SCRIPT=$FINAL_SCRIPT"&&printf %s '$ENCODED_TAR'|openssl enc -base64 -d|tar -xzmf - -C \"\$SSHHOME\""
-        FINAL_SCRIPT=$FINAL_SCRIPT'&&"$SSHHOME/bashsshrc"'
+        FINAL_SCRIPT=$FINAL_SCRIPT'&&{ "$SSHHOME/sshrc.welcome";"$SSHHOME/bashsshrc";}'
 
         if [ "${#FINAL_SCRIPT}" -gt 65536 ]; then
             printf >&2 '.sshrc.d and .sshrc files must be less than 64kb compressed\ncurrent size: %s bytes\n' "$SIZE"
