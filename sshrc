@@ -1,67 +1,66 @@
 #!/usr/bin/env bash
 function sshrc() {
     local SSHHOME=${SSHHOME:=~}
+
     if [ -f $SSHHOME/.sshrc ]; then
         local files=.sshrc
         if [ -d $SSHHOME/.sshrc.d ]; then
             files="$files .sshrc.d"
         fi
-        SIZE=$(tar cfz - -h -C $SSHHOME $files | wc -c)
-        if [ $SIZE -gt 65536 ]; then
-            printf >&2 '.sshrc.d and .sshrc files must be less than 64kb\ncurrent size: %s bytes\n' "$SIZE"
-            exit 1
-        fi
-        if [ -z "$CMDARG" -a ! -e ~/.sshrc.d/.hushlogin ]; then
-            WELCOME_MSG="
-                if [ ! -e ~/.hushlogin ]; then
-                    if [ -e /etc/motd ]; then cat /etc/motd; fi
-                    if [ -e /etc/update-motd.d ]; then run-parts /etc/update-motd.d/ 2>/dev/null; fi
-                    last -F \$USER 2>/dev/null | grep -v 'still logged in' | head -n1 | awk '{print \"Last login:\",\$4,\$5,\$6,\$7,\$8,\"from\",\$3;}'
-                fi
-                "
-        else
-            WELCOME_MSG=""
-        fi
-        ssh -t "$DOMAIN" $SSHARGS "
-            command -v openssl >/dev/null 2>&1 || { printf >&2 \"sshrc requires openssl to be installed on the server, but it's not. Aborting.\\n\"; exit 1; }
-            $WELCOME_MSG
-            export SSHHOME=\$(mktemp -d -t .$(whoami).sshrc.XXXX)
-            export SSHRCCLEANUP=\$SSHHOME
-            trap \"rm -rf \$SSHRCCLEANUP; exit\" 0
-            printf %s '"$(cat "$0" | openssl enc -base64)"' | tr -s ' ' '\\n' | openssl enc -base64 -d > \$SSHHOME/sshrc
-            chmod +x \$SSHHOME/sshrc
 
-            printf %s '"$( cat << 'EOF' | openssl enc -base64
+        unset SSHTARHOME
+        trap '[ -n "$SSHTARHOME" ] && rm -rf -- "$SSHTARHOME"' EXIT
+        SSHTARHOME=$(mktemp -d -t "sshrc.XXXXXXXX")
+
+        (cd -- "$SSHHOME" && cp -pr -- $files "$SSHTARHOME/")
+        cp -pr -- "$0" "$SSHTARHOME/"
+
+        {
+            sed 's/^\s*//g' << EOF
                 if [ -r /etc/profile ]; then source /etc/profile; fi
                 if [ -r ~/.bash_profile ]; then source ~/.bash_profile
                 elif [ -r ~/.bash_login ]; then source ~/.bash_login
                 elif [ -r ~/.profile ]; then source ~/.profile
                 fi
-                export PATH=$PATH:$SSHHOME
-                source $SSHHOME/.sshrc;
+                export PATH="\$PATH:\$SSHHOME"
+                source "\$SSHHOME/.sshrc"
 EOF
-                )"' | tr -s ' ' '\\n' | openssl enc -base64 -d > \$SSHHOME/sshrc.bashrc
+            printf %s\\n "$CMDARG"
+        } > "$SSHTARHOME/sshrc.bashrc"
 
-            printf %s '"$( cat << 'EOF' | openssl enc -base64
-#!/usr/bin/env bash
-                exec bash --rcfile <(printf %s\\n '
-                [ -r /etc/profile ] && source /etc/profile
-                if [ -r ~/.bash_profile ]; then source ~/.bash_profile
-                elif [ -r ~/.bash_login ]; then source ~/.bash_login
-                elif [ -r ~/.profile ]; then source ~/.profile
-                fi
-                source '$SSHHOME'/.sshrc;
-                export PATH=$PATH:'$SSHHOME'
-                ') "$@"
+        sed 's/^\s*//g' > "$SSHTARHOME/bashsshrc" << 'EOF'
+            #!/bin/sh
+            "$SSHHOME/sshrc.welcome"
+            exec bash --rcfile "$SSHHOME/sshrc.bashrc" "$@"
 EOF
-                )"' | tr -s ' ' '\\n' | openssl enc -base64 -d > \$SSHHOME/bashsshrc
-            chmod +x \$SSHHOME/bashsshrc
+        chmod -- +x "$SSHTARHOME/bashsshrc"
 
-            printf %s '"$(tar czf - -h -C $SSHHOME $files | openssl enc -base64)"' | tr -s ' ' '\\n' | openssl enc -base64 -d | tar mxzf - -C \$SSHHOME
-            export SSHHOME=\$SSHHOME
-            printf %s\\\\n \"$CMDARG\" >> \$SSHHOME/sshrc.bashrc
-            bash --rcfile \$SSHHOME/sshrc.bashrc
-            "
+        {
+            echo '#!/bin/sh'
+            if [ -z "$CMDARG" ] && ! [ -e ~/.sshrc.d/.hushlogin ]; then
+                printf %s '
+                    if [ ! -e ~/.hushlogin ]; then
+                        if [ -e /etc/motd ]; then cat /etc/motd; fi
+                        if [ -e /etc/update-motd.d ]; then run-parts /etc/update-motd.d/ 2>/dev/null; fi
+                        last -aF "$USER" 2>/dev/null | awk '\''!/still logged in/{print "Last login:",$3,$4,$5,$6,$7,"from",$15;exit}'\''
+                    fi
+                '
+            fi
+        } | sed 's/^\s*//g' > "$SSHTARHOME/sshrc.welcome"
+        chmod +x "$SSHTARHOME/sshrc.welcome"
+
+        ENCODED_TAR=$(cd -- "$SSHTARHOME" && tar -chzf - . | openssl enc -base64)
+        FINAL_SCRIPT="command -v openssl>/dev/null||{ printf>&2 \"sshrc requires openssl to be installed on the server, but it's not. Aborting.\\n\";exit 1;}"
+        FINAL_SCRIPT=$FINAL_SCRIPT';SSHHOME=;trap '\''rm -rf -- "$SSHHOME"'\'' 0'
+        FINAL_SCRIPT=$FINAL_SCRIPT'&&export SSHHOME=$(mktemp -d -t sshrc.XXXXXXXX)'
+        FINAL_SCRIPT=$FINAL_SCRIPT"&&printf %s '$ENCODED_TAR'|openssl enc -base64 -d|tar -xzmf - -C \"\$SSHHOME\""
+        FINAL_SCRIPT=$FINAL_SCRIPT'&&"$SSHHOME/bashsshrc"'
+
+        if [ "${#FINAL_SCRIPT}" -gt 65536 ]; then
+            printf >&2 '.sshrc.d and .sshrc files must be less than 64kb compressed\ncurrent size: %s bytes\n' "$SIZE"
+            exit 1
+        fi
+        ssh -t "$DOMAIN" $SSHARGS "$FINAL_SCRIPT"
     else
         printf 'No such file: %s\n' "$SSHHOME/.sshrc" >&2
         exit 1
